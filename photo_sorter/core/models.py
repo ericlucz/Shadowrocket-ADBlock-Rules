@@ -23,6 +23,36 @@ FOLDER_PATTERNS = {
     '年（2024）': '%Y',
 }
 
+# 归类方式
+GROUP_DATE = 'date'
+GROUP_CATEGORY = 'category'
+GROUP_CATEGORY_DATE = 'category_date'
+GROUP_DATE_CATEGORY = 'date_category'
+
+GROUP_LABELS = {
+    '按拍摄日期': GROUP_DATE,
+    '按图片内容': GROUP_CATEGORY,
+    '先内容再日期（风景/2024-05）': GROUP_CATEGORY_DATE,
+    '先日期再内容（2024-05/风景）': GROUP_DATE_CATEGORY,
+}
+
+# 内容识别方式
+CLASSIFIER_HEURISTIC = 'heuristic'
+CLASSIFIER_CLIP = 'clip'
+
+CLASSIFIER_LABELS = {
+    '快速规则（看尺寸、格式、EXIF，秒出结果）': CLASSIFIER_HEURISTIC,
+    '本地 AI 模型 CLIP（识别画面内容，需先下载模型）': CLASSIFIER_CLIP,
+}
+
+# CLIP 默认分类；键是文件夹名，值是给模型看的英文描述
+DEFAULT_CLIP_CATEGORIES = (
+    '人物', '风景', '美食', '动物', '植物', '建筑',
+    '截图', '文档', '车辆', '其它',
+)
+
+CATEGORY_UNKNOWN = '其它'
+
 # 取日期的来源
 SOURCE_EXIF = 'EXIF 拍摄时间'
 SOURCE_FILENAME = '文件名日期'
@@ -56,6 +86,19 @@ class SortOptions:
     on_conflict: str = CONFLICT_RENAME
     skip_same_content: bool = True
     extensions: tuple = DEFAULT_EXTENSIONS
+    group_by: str = GROUP_DATE
+    classifier: str = CLASSIFIER_HEURISTIC
+    categories: tuple = DEFAULT_CLIP_CATEGORIES
+    clip_model: str = 'ViT-B-32'
+    clip_pretrained: str = 'openai'
+
+    @property
+    def needs_category(self) -> bool:
+        return self.group_by != GROUP_DATE
+
+    @property
+    def needs_date(self) -> bool:
+        return self.group_by != GROUP_CATEGORY
 
     def normalized_extensions(self) -> frozenset:
         return frozenset(e.lower() if e.startswith('.') else '.' + e.lower()
@@ -71,6 +114,7 @@ class PlanItem:
     action: str = ACTION_MOVE
     taken_at: Optional[datetime] = None
     date_source: str = SOURCE_NONE
+    category: str = ''
     reason: str = ''
 
     @property

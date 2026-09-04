@@ -7,8 +7,11 @@ import sys
 from pathlib import Path
 
 from .core import executor, planner
-from .core.models import (CONFLICT_RENAME, CONFLICT_SKIP, OP_COPY, OP_MOVE,
-                          SortOptions)
+from .core.models import (CLASSIFIER_CLIP, CLASSIFIER_HEURISTIC,
+                          CONFLICT_RENAME, CONFLICT_SKIP,
+                          DEFAULT_CLIP_CATEGORIES, GROUP_CATEGORY,
+                          GROUP_CATEGORY_DATE, GROUP_DATE, GROUP_DATE_CATEGORY,
+                          OP_COPY, OP_MOVE, SortOptions)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +29,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument('--unknown-dir', default='未知日期', help='无法识别日期时的文件夹名')
     parser.add_argument('--on-conflict', choices=[CONFLICT_RENAME, CONFLICT_SKIP],
                         default=CONFLICT_RENAME, help='目标有同名文件时改名还是跳过')
+    parser.add_argument('-g', '--group-by',
+                        choices=[GROUP_DATE, GROUP_CATEGORY, GROUP_CATEGORY_DATE,
+                                 GROUP_DATE_CATEGORY],
+                        default=GROUP_DATE,
+                        help='归类方式：按日期 / 按内容 / 内容+日期 / 日期+内容')
+    parser.add_argument('--classifier', choices=[CLASSIFIER_HEURISTIC, CLASSIFIER_CLIP],
+                        default=CLASSIFIER_HEURISTIC,
+                        help='内容识别方式：快速规则或本地 CLIP 模型')
+    parser.add_argument('--categories', default='',
+                        help='CLIP 的分类，逗号分隔，如「人物,风景,美食」；留空用默认')
     parser.add_argument('--apply', action='store_true', help='真正执行；默认只预览')
     parser.add_argument('--undo', action='store_true', help='撤销上一次整理')
     return parser
@@ -64,12 +77,17 @@ def main(argv=None) -> int:
         use_mtime=not args.no_mtime,
         unknown_dir=args.unknown_dir,
         on_conflict=args.on_conflict,
+        group_by=args.group_by,
+        classifier=args.classifier,
+        categories=tuple(c for c in args.categories.replace('，', ',').split(',') if c.strip())
+                   or DEFAULT_CLIP_CATEGORIES,
     )
 
     plan = planner.build_plan(source, dest, options)
     for item in plan.items:
         if item.will_change:
-            print('%s  ->  %s  [%s]' % (item.source.name, item.dest, item.date_source))
+            tag = item.category if not options.needs_date else item.date_source
+            print('%s  ->  %s  [%s]' % (item.source.name, item.dest, tag))
         else:
             print('%s  --  %s' % (item.source.name, item.reason))
     print('共 %d 个文件，待处理 %d 个，跳过 %d 个。'

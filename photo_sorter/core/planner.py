@@ -8,9 +8,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, List, Optional
 
+from .classifier import BaseClassifier, create_classifier
 from .datesource import resolve_datetime
-from .models import (ACTION_COPY, ACTION_MOVE, ACTION_SKIP, CONFLICT_SKIP,
-                     OP_COPY, Plan, PlanItem, SortOptions)
+from .models import (ACTION_COPY, ACTION_MOVE, ACTION_SKIP, CATEGORY_UNKNOWN,
+                     CONFLICT_SKIP, GROUP_CATEGORY, GROUP_CATEGORY_DATE,
+                     GROUP_DATE_CATEGORY, OP_COPY, SOURCE_NONE, Plan, PlanItem,
+                     SortOptions)
 
 ProgressCb = Optional[Callable[[int, int, Path], None]]
 CancelCb = Optional[Callable[[], bool]]
@@ -34,16 +37,35 @@ def scan_images(root: Path, options: SortOptions) -> List[Path]:
     return found
 
 
-def _target_dir(dest_root: Path, taken_at: Optional[datetime], options: SortOptions) -> Path:
-    """按模板拼出目标文件夹；模板里的 / 会展开成多层目录。"""
+def _sanitize(name: str) -> str:
+    """文件夹名里不能有路径分隔符和 Windows 禁用字符。"""
+    cleaned = ''.join('_' if ch in '\\/:*?"<>|' else ch for ch in name).strip(' .')
+    return cleaned or CATEGORY_UNKNOWN
+
+
+def _date_parts(taken_at: Optional[datetime], options: SortOptions) -> list:
+    """把日期模板展开成一层层文件夹名。"""
     if taken_at is None:
-        return dest_root / options.unknown_dir
+        return [_sanitize(options.unknown_dir)]
     rendered = taken_at.strftime(options.pattern)
+    return [_sanitize(part) for part in rendered.replace('\\', '/').split('/') if part.strip()]
+
+
+def _target_dir(dest_root: Path, taken_at: Optional[datetime], category: str,
+                options: SortOptions) -> Path:
+    """按归类方式拼出目标文件夹。"""
+    category_parts = [_sanitize(category or CATEGORY_UNKNOWN)]
+    if options.group_by == GROUP_CATEGORY:
+        parts = category_parts
+    elif options.group_by == GROUP_CATEGORY_DATE:
+        parts = category_parts + _date_parts(taken_at, options)
+    elif options.group_by == GROUP_DATE_CATEGORY:
+        parts = _date_parts(taken_at, options) + category_parts
+    else:
+        parts = _date_parts(taken_at, options)
     target = dest_root
-    for part in rendered.replace('\\', '/').split('/'):
-        part = part.strip()
-        if part:
-            target = target / part
+    for part in parts:
+        target = target / part
     return target
 
 
@@ -85,7 +107,8 @@ def same_content(a: Path, b: Path) -> bool:
 
 
 def build_plan(source_root: Path, dest_root: Path, options: SortOptions,
-               progress: ProgressCb = None, cancel: CancelCb = None) -> Plan:
+               progress: ProgressCb = None, cancel: CancelCb = None,
+               classifier: Optional[BaseClassifier] = None) -> Plan:
     """扫描并生成整理计划；只读磁盘，不做任何修改。"""
     source_root = Path(source_root).resolve()
     dest_root = Path(dest_root).resolve()
@@ -94,6 +117,8 @@ def build_plan(source_root: Path, dest_root: Path, options: SortOptions,
     total = len(files)
     taken: set = set()
     action = ACTION_COPY if options.operation == OP_COPY else ACTION_MOVE
+    if options.needs_category and classifier is None:
+        classifier = create_classifier(options)
 
     for index, path in enumerate(files, 1):
         if cancel and cancel():
@@ -101,26 +126,30 @@ def build_plan(source_root: Path, dest_root: Path, options: SortOptions,
         if progress:
             progress(index, total, path)
 
-        taken_at, date_source = resolve_datetime(path, options)
-        target = _target_dir(dest_root, taken_at, options) / path.name
+        if options.needs_date:
+            taken_at, date_source = resolve_datetime(path, options)
+        else:
+            taken_at, date_source = None, SOURCE_NONE
+        category = classifier.classify(path)[0] if classifier is not None else ''
+        target = _target_dir(dest_root, taken_at, category, options) / path.name
 
         if target == path:
             plan.items.append(PlanItem(path, target, ACTION_SKIP, taken_at,
-                                       date_source, '已在目标位置'))
+                                       date_source, category, '已在目标位置'))
             continue
 
         if target.exists() or target in taken:
             if options.skip_same_content and target.exists() and same_content(path, target):
                 plan.items.append(PlanItem(path, target, ACTION_SKIP, taken_at,
-                                           date_source, '目标已存在相同文件'))
+                                           date_source, category, '目标已存在相同文件'))
                 continue
             if options.on_conflict == CONFLICT_SKIP:
                 plan.items.append(PlanItem(path, target, ACTION_SKIP, taken_at,
-                                           date_source, '目标已存在同名文件'))
+                                           date_source, category, '目标已存在同名文件'))
                 continue
             target = unique_name(target, taken)
 
         taken.add(target)
-        plan.items.append(PlanItem(path, target, action, taken_at, date_source, ''))
+        plan.items.append(PlanItem(path, target, action, taken_at, date_source, category, ''))
 
     return plan

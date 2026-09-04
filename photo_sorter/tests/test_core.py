@@ -4,7 +4,9 @@
 
 import os
 import shutil
+import sys
 import tempfile
+import types
 import unittest
 from datetime import datetime
 from pathlib import Path
@@ -12,10 +14,15 @@ from pathlib import Path
 from PIL import Image
 
 from photo_sorter.core import executor, planner
+from photo_sorter.core.classifier import (ClipClassifier, HeuristicClassifier,
+                                          clip_prompt, create_classifier)
 from photo_sorter.core.datesource import (read_exif_datetime,
                                           read_filename_datetime,
                                           resolve_datetime)
-from photo_sorter.core.models import (ACTION_SKIP, CONFLICT_SKIP, OP_COPY,
+from photo_sorter.core.models import (ACTION_SKIP, CATEGORY_UNKNOWN,
+                                      CLASSIFIER_CLIP, CONFLICT_SKIP,
+                                      GROUP_CATEGORY, GROUP_CATEGORY_DATE,
+                                      GROUP_DATE_CATEGORY, OP_COPY,
                                       SOURCE_EXIF, SOURCE_FILENAME,
                                       SOURCE_MTIME, SOURCE_NONE, SortOptions)
 
@@ -204,6 +211,179 @@ class ExecutorTest(TempCaseBase):
         plan = planner.build_plan(self.src, self.src, SortOptions())
         result = executor.execute(plan)
         self.assertIsNone(result.journal_path)
+
+
+class StubClassifier(HeuristicClassifier):
+    """测试用：按文件名前缀给分类，不看画面。"""
+
+    def classify(self, path):
+        return path.name.split('_')[0], 1.0
+
+
+class HeuristicClassifierTest(TempCaseBase):
+
+    def setUp(self):
+        super().setUp()
+        self.classifier = HeuristicClassifier()
+
+    def category(self, path):
+        return self.classifier.classify(path)[0]
+
+    def test_screenshot_by_filename(self):
+        path = make_jpeg(self.src / 'Screenshot 2024-05-01.png')
+        self.assertEqual(self.category(path), '截图')
+
+    def test_animated_gif(self):
+        path = self.src / 'dance.gif'
+        frames = [Image.new('RGB', (64, 64), (r, 0, 0)) for r in (0, 128, 255)]
+        frames[0].save(path, save_all=True, append_images=frames[1:], duration=100, loop=0)
+        self.assertEqual(self.category(path), '动图')
+
+    def test_tiny_image_is_icon(self):
+        path = self.src / 'small.png'
+        Image.new('RGB', (32, 32), (10, 20, 30)).save(path)
+        self.assertEqual(self.category(path), '图标')
+
+    def test_very_long_image(self):
+        path = self.src / 'long.png'
+        Image.new('RGB', (600, 4000), (10, 20, 30)).save(path)
+        self.assertEqual(self.category(path), '长图')
+
+    def test_camera_exif_means_photo(self):
+        path = self.src / 'cam.jpg'
+        image = Image.new('RGB', (800, 600), (30, 60, 90))
+        exif = Image.Exif()
+        exif[0x010F] = 'Apple'
+        exif[0x0110] = 'iPhone 15'
+        image.save(path, 'JPEG', exif=exif)
+        self.assertEqual(self.category(path), '照片')
+
+    def test_flat_color_image_is_graphic(self):
+        path = self.src / 'flat.png'
+        Image.new('RGB', (900, 700), (200, 30, 30)).save(path)
+        self.assertEqual(self.category(path), '图形')
+
+    def test_broken_file_falls_back(self):
+        path = self.src / 'broken.jpg'
+        path.write_bytes(b'nope')
+        self.assertEqual(self.category(path), CATEGORY_UNKNOWN)
+
+    def test_clip_prompts_cover_custom_categories(self):
+        self.assertIn('landscape', clip_prompt('风景'))
+        self.assertIn('自定义分类', clip_prompt('自定义分类'))
+
+    def test_clip_falls_back_when_not_installed(self):
+        options = SortOptions(group_by=GROUP_CATEGORY, classifier=CLASSIFIER_CLIP)
+        classifier = create_classifier(options)
+        expected = ClipClassifier if ClipClassifier.is_installed() else HeuristicClassifier
+        self.assertIsInstance(classifier, expected)
+
+    def test_no_classifier_when_grouping_by_date_only(self):
+        self.assertIsNone(create_classifier(SortOptions()))
+
+
+def _torch_available() -> bool:
+    import importlib.util
+    return importlib.util.find_spec('torch') is not None
+
+
+@unittest.skipUnless(_torch_available(), '没装 torch，跳过 CLIP 相关测试')
+class ClipClassifierTest(TempCaseBase):
+    """用假的 open_clip 顶替真模型，验证取分类的那套流程本身是对的。"""
+
+    def setUp(self):
+        super().setUp()
+        import torch
+
+        text_features = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
+        image_features = torch.tensor([[0.0, 1.0]])  # 与第二个分类最像
+
+        class FakeModel:
+            def eval(self):
+                return self
+
+            def encode_text(self, tokens):
+                return text_features.clone()
+
+            def encode_image(self, tensor):
+                return image_features.clone()
+
+        fake = types.ModuleType('open_clip')
+        fake.create_model_and_transforms = (
+            lambda name, pretrained=None: (FakeModel(), None,
+                                           lambda image: torch.zeros(3, 4, 4)))
+        fake.get_tokenizer = lambda name: (lambda prompts: prompts)
+        self._saved = sys.modules.get('open_clip')
+        sys.modules['open_clip'] = fake
+        self.image = make_jpeg(self.src / 'a.jpg', '2024:05:01 12:30:00')
+
+    def tearDown(self):
+        if self._saved is None:
+            sys.modules.pop('open_clip', None)
+        else:
+            sys.modules['open_clip'] = self._saved
+        super().tearDown()
+
+    def test_picks_the_closest_category(self):
+        classifier = ClipClassifier(('人物', '风景'))
+        category, confidence = classifier.classify(self.image)
+        self.assertEqual(category, '风景')
+        self.assertGreater(confidence, 0.9)
+
+    def test_model_is_loaded_only_once(self):
+        classifier = ClipClassifier(('人物', '风景'))
+        classifier.prepare()
+        model = classifier._model
+        classifier.prepare()
+        self.assertIs(classifier._model, model)
+
+    def test_low_confidence_falls_back_to_unknown(self):
+        classifier = ClipClassifier(('人物', '风景'), min_confidence=1.1)
+        self.assertEqual(classifier.classify(self.image)[0], CATEGORY_UNKNOWN)
+
+    def test_unreadable_file_is_not_fatal(self):
+        broken = self.src / 'broken.jpg'
+        broken.write_bytes(b'nope')
+        self.assertEqual(ClipClassifier(('人物', '风景')).classify(broken),
+                         (CATEGORY_UNKNOWN, 0.0))
+
+
+class GroupingTest(TempCaseBase):
+
+    def setUp(self):
+        super().setUp()
+        make_jpeg(self.src / '风景_a.jpg', '2024:05:01 12:30:00')
+
+    def plan_with(self, group_by):
+        options = SortOptions(group_by=group_by)
+        return planner.build_plan(self.src, self.tmp / 'out', options,
+                                  classifier=StubClassifier())
+
+    def test_group_by_category(self):
+        item = self.plan_with(GROUP_CATEGORY).items[0]
+        self.assertEqual(item.dest, self.tmp / 'out' / '风景' / '风景_a.jpg')
+        self.assertEqual(item.category, '风景')
+        self.assertIsNone(item.taken_at)  # 不按日期归类时就不去读日期
+
+    def test_category_then_date(self):
+        item = self.plan_with(GROUP_CATEGORY_DATE).items[0]
+        self.assertEqual(item.dest,
+                         self.tmp / 'out' / '风景' / '2024' / '2024-05' / '风景_a.jpg')
+
+    def test_date_then_category(self):
+        item = self.plan_with(GROUP_DATE_CATEGORY).items[0]
+        self.assertEqual(item.dest,
+                         self.tmp / 'out' / '2024' / '2024-05' / '风景' / '风景_a.jpg')
+
+    def test_category_name_is_sanitized(self):
+        class SlashClassifier(HeuristicClassifier):
+            def classify(self, path):
+                return 'a/b:c', 1.0
+
+        plan = planner.build_plan(self.src, self.tmp / 'out',
+                                  SortOptions(group_by=GROUP_CATEGORY),
+                                  classifier=SlashClassifier())
+        self.assertEqual(plan.items[0].dest.parent, self.tmp / 'out' / 'a_b_c')
 
 
 if __name__ == '__main__':

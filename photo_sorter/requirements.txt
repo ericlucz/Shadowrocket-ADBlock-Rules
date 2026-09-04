@@ -2,3 +2,6 @@ PySide6>=6.5
 Pillow>=9.0
 # 可选：装了才能读 iPhone 的 HEIC/HEIF
 pillow-heif>=0.13; platform_python_implementation == "CPython"
+
+# 可选：AI 内容识别（按画面内容分类）才需要，不装则自动用快速规则
+# pip install torch open_clip_torch

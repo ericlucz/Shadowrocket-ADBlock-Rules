@@ -4,8 +4,8 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import QSettings
-from PySide6.QtGui import QBrush, QColor
+from PySide6.QtCore import QSettings, QSize
+from PySide6.QtGui import QBrush, QColor, QIcon, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
                                QFileDialog, QFormLayout, QGridLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel,
@@ -14,14 +14,20 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
                                QVBoxLayout, QWidget)
 
 from ..core import executor
-from ..core.models import (CONFLICT_RENAME, CONFLICT_SKIP, FOLDER_PATTERNS,
-                           OP_COPY, OP_MOVE, SortOptions)
-from .workers import ExecuteWorker, ScanWorker, UndoWorker
+from ..core.classifier import ClipClassifier
+from ..core.models import (CLASSIFIER_CLIP, CLASSIFIER_HEURISTIC,
+                           CLASSIFIER_LABELS, CONFLICT_RENAME, CONFLICT_SKIP,
+                           DEFAULT_CLIP_CATEGORIES, FOLDER_PATTERNS, GROUP_DATE,
+                           GROUP_LABELS, OP_COPY, OP_MOVE, SortOptions)
+from .workers import ExecuteWorker, ScanWorker, ThumbnailLoader, UndoWorker
 
 # 表格太长会拖慢界面，超过这个数量只展示前面一部分
 MAX_PREVIEW_ROWS = 3000
 
-COLUMNS = ['文件名', '拍摄时间', '时间来源', '整理后位置', '说明']
+COLUMNS = ['预览', '文件名', '拍摄时间', '时间来源', '分类', '整理后位置', '说明']
+COL_THUMB, COL_NAME, COL_TAKEN, COL_SOURCE, COL_CATEGORY, COL_DEST, COL_REASON = range(7)
+
+THUMB_SIZE = 48
 
 
 class MainWindow(QWidget):
@@ -34,6 +40,12 @@ class MainWindow(QWidget):
         self._settings = QSettings('photo_sorter', 'photo_sorter')
         self._plan = None
         self._worker = None
+        self._loading = False   # 读配置期间不弹提示
+        self._thumb_rows = {}   # 行号 -> 图片路径
+        self._thumb_done = set()
+        self._thumbs = ThumbnailLoader(THUMB_SIZE, self)
+        self._thumbs.ready.connect(self._on_thumbnail)
+        self._thumbs.start()
 
         self._build_ui()
         self._load_settings()
@@ -84,6 +96,18 @@ class MainWindow(QWidget):
         outer = QHBoxLayout(box)
 
         left = QFormLayout()
+        self.group_combo = QComboBox()
+        for label, value in GROUP_LABELS.items():
+            self.group_combo.addItem(label, value)
+        self.group_combo.currentIndexChanged.connect(self._on_group_changed)
+        left.addRow('归类方式：', self.group_combo)
+
+        self.classifier_combo = QComboBox()
+        for label, value in CLASSIFIER_LABELS.items():
+            self.classifier_combo.addItem(label, value)
+        self.classifier_combo.currentIndexChanged.connect(self._on_classifier_changed)
+        left.addRow('内容识别：', self.classifier_combo)
+
         self.pattern_combo = QComboBox()
         for label, pattern in FOLDER_PATTERNS.items():
             self.pattern_combo.addItem(label, pattern)
@@ -101,6 +125,11 @@ class MainWindow(QWidget):
 
         self.unknown_edit = QLineEdit('未知日期')
         left.addRow('无日期时放入：', self.unknown_edit)
+
+        self.categories_edit = QLineEdit()
+        self.categories_edit.setPlaceholderText('用空格或逗号分隔，如：人物 风景 美食 动物')
+        self.categories_edit.setToolTip('只对 AI 模型识别生效；留空则用默认分类。')
+        left.addRow('内容分类：', self.categories_edit)
         outer.addLayout(left, 1)
 
         right = QVBoxLayout()
@@ -145,9 +174,14 @@ class MainWindow(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
+        self.table.setIconSize(QSize(THUMB_SIZE, THUMB_SIZE))
+        self.table.verticalHeader().setDefaultSectionSize(THUMB_SIZE + 8)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeToContents)
-        header.setSectionResizeMode(3, QHeaderView.Stretch)
+        header.setSectionResizeMode(COL_THUMB, QHeaderView.Fixed)
+        header.resizeSection(COL_THUMB, THUMB_SIZE + 12)
+        header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeToContents)
+        header.setSectionResizeMode(COL_DEST, QHeaderView.Stretch)
+        self.table.verticalScrollBar().valueChanged.connect(self._request_visible_thumbnails)
         return self.table
 
     def _build_status_row(self) -> QWidget:
@@ -165,10 +199,25 @@ class MainWindow(QWidget):
     # ---------- 配置读写 ----------
 
     def _load_settings(self) -> None:
+        self._loading = True
+        try:
+            self._apply_saved_settings()
+        finally:
+            self._loading = False
+        self._on_group_changed()
+
+    def _apply_saved_settings(self) -> None:
         get = self._settings.value
         self.source_edit.setText(get('source', '', str))
         self.dest_edit.setText(get('dest', '', str))
         self.same_dest_check.setChecked(get('same_dest', True, bool))
+        index = self.group_combo.findData(get('group_by', GROUP_DATE, str))
+        if index >= 0:
+            self.group_combo.setCurrentIndex(index)
+        index = self.classifier_combo.findData(get('classifier', CLASSIFIER_HEURISTIC, str))
+        if index >= 0:
+            self.classifier_combo.setCurrentIndex(index)
+        self.categories_edit.setText(get('categories', '', str))
         index = self.pattern_combo.findData(get('pattern', '%Y/%Y-%m', str))
         if index >= 0:
             self.pattern_combo.setCurrentIndex(index)
@@ -190,6 +239,9 @@ class MainWindow(QWidget):
         put('source', self.source_edit.text())
         put('dest', self.dest_edit.text())
         put('same_dest', self.same_dest_check.isChecked())
+        put('group_by', self.group_combo.currentData())
+        put('classifier', self.classifier_combo.currentData())
+        put('categories', self.categories_edit.text())
         put('pattern', self.pattern_combo.currentData())
         put('operation', self.operation_combo.currentData())
         put('conflict', self.conflict_combo.currentData())
@@ -202,6 +254,8 @@ class MainWindow(QWidget):
 
     def closeEvent(self, event) -> None:
         self._save_settings()
+        self._thumbs.stop()
+        self._thumbs.wait(2000)
         if self._worker and self._worker.isRunning():
             self._worker.cancel()
             self._worker.wait(3000)
@@ -224,6 +278,33 @@ class MainWindow(QWidget):
         self.dest_btn.setEnabled(not checked)
         self._on_folder_changed()
 
+    def _on_group_changed(self, *_) -> None:
+        """归类方式一变，跟日期或内容相关的控件也跟着可用/禁用。"""
+        options = self._current_options()
+        for widget in (self.pattern_combo, self.unknown_edit, self.exif_check,
+                       self.filename_check, self.mtime_check):
+            widget.setEnabled(options.needs_date)
+        self.classifier_combo.setEnabled(options.needs_category)
+        self.categories_edit.setEnabled(
+            options.needs_category and options.classifier == CLASSIFIER_CLIP)
+        self.table.setColumnHidden(COL_CATEGORY, not options.needs_category)
+        self.table.setColumnHidden(COL_TAKEN, not options.needs_date)
+        self.table.setColumnHidden(COL_SOURCE, not options.needs_date)
+        self._on_folder_changed()
+
+    def _on_classifier_changed(self, *_) -> None:
+        self.categories_edit.setEnabled(
+            self.classifier_combo.currentData() == CLASSIFIER_CLIP
+            and self.classifier_combo.isEnabled())
+        if (not self._loading
+                and self.classifier_combo.currentData() == CLASSIFIER_CLIP
+                and not ClipClassifier.is_installed()):
+            QMessageBox.information(
+                self, '还没装 AI 模型依赖',
+                'AI 内容识别需要额外安装：\n\n    pip install torch open_clip_torch\n\n'
+                '装好后重开程序即可使用。现在会先用“快速规则”来分类。')
+        self._on_folder_changed()
+
     def _on_folder_changed(self, *_) -> None:
         # 文件夹一改，之前的预览就作废了
         self._clear_plan()
@@ -244,6 +325,11 @@ class MainWindow(QWidget):
         self.cancel_btn.setEnabled(busy)
         self.undo_btn.setEnabled(not busy and executor.latest_journal() is not None)
 
+    def _parsed_categories(self) -> tuple:
+        text = self.categories_edit.text().replace('，', ' ').replace(',', ' ')
+        parts = tuple(part for part in text.split() if part)
+        return parts or DEFAULT_CLIP_CATEGORIES
+
     def _current_options(self) -> SortOptions:
         return SortOptions(
             pattern=self.pattern_combo.currentData(),
@@ -255,6 +341,9 @@ class MainWindow(QWidget):
             unknown_dir=self.unknown_edit.text().strip() or '未知日期',
             on_conflict=self.conflict_combo.currentData(),
             skip_same_content=self.dedup_check.isChecked(),
+            group_by=self.group_combo.currentData(),
+            classifier=self.classifier_combo.currentData(),
+            categories=self._parsed_categories(),
         )
 
     def _resolved_folders(self):
@@ -289,6 +378,7 @@ class MainWindow(QWidget):
         self.progress.setRange(0, 0)
 
         worker = ScanWorker(source, dest, self._current_options(), self)
+        worker.stage.connect(self.status_label.setText)
         worker.progress.connect(self._on_progress)
         worker.finished_plan.connect(self._on_plan_ready)
         worker.failed.connect(self._on_failed)
@@ -311,6 +401,9 @@ class MainWindow(QWidget):
 
     def _fill_table(self, plan) -> None:
         items = plan.items[:MAX_PREVIEW_ROWS]
+        self._thumbs.clear()
+        self._thumb_rows = {}
+        self._thumb_done = set()
         self.table.setRowCount(len(items))
         grey = QBrush(QColor(150, 150, 150))
         dest_root = plan.dest_root
@@ -320,16 +413,55 @@ class MainWindow(QWidget):
             except ValueError:
                 shown_dest = item.dest
             taken = item.taken_at.strftime('%Y-%m-%d %H:%M:%S') if item.taken_at else '—'
-            values = [item.source.name, taken, item.date_source, str(shown_dest),
-                      item.reason or ('待复制' if item.action == 'copy' else '待移动')]
-            for column, text in enumerate(values):
+            values = {
+                COL_THUMB: '',
+                COL_NAME: item.source.name,
+                COL_TAKEN: taken,
+                COL_SOURCE: item.date_source if item.taken_at else '—',
+                COL_CATEGORY: item.category or '—',
+                COL_DEST: str(shown_dest),
+                COL_REASON: item.reason or ('待复制' if item.action == 'copy' else '待移动'),
+            }
+            for column, text in values.items():
                 cell = QTableWidgetItem(text)
                 cell.setToolTip(str(item.source))
                 if not item.will_change:
                     cell.setForeground(grey)
                 self.table.setItem(row, column, cell)
+            self._thumb_rows[row] = item.source
+        self._request_visible_thumbnails()
         if len(plan.items) > MAX_PREVIEW_ROWS:
             self.status_label.setText('文件较多，表格只显示前 %d 条。' % MAX_PREVIEW_ROWS)
+
+    # ---------- 缩略图 ----------
+
+    def _request_visible_thumbnails(self, *_) -> None:
+        """只给看得见的行排队加载，多几行富余以便滚动时不空着。"""
+        if not self._thumb_rows:
+            return
+        first = self.table.rowAt(0)
+        last = self.table.rowAt(self.table.viewport().height() - 1)
+        if first < 0:
+            first = 0
+        if last < 0:
+            last = self.table.rowCount() - 1
+        wanted = []
+        for row in range(max(first - 5, 0), min(last + 6, self.table.rowCount())):
+            if row in self._thumb_done or row not in self._thumb_rows:
+                continue
+            self._thumb_done.add(row)
+            wanted.append((row, str(self._thumb_rows[row])))
+        self._thumbs.request(wanted)
+
+    def _on_thumbnail(self, row: int, image) -> None:
+        cell = self.table.item(row, COL_THUMB)
+        if cell is None or row not in self._thumb_rows:
+            return
+        cell.setIcon(QIcon(QPixmap.fromImage(image)))
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._request_visible_thumbnails()
 
     # ---------- 执行 ----------
 
