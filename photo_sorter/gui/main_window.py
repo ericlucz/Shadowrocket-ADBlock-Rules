@@ -179,7 +179,8 @@ class MainWindow(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(COL_THUMB, QHeaderView.Fixed)
         header.resizeSection(COL_THUMB, THUMB_SIZE + 12)
-        header.setSectionResizeMode(COL_NAME, QHeaderView.ResizeToContents)
+        for column in (COL_NAME, COL_TAKEN, COL_SOURCE, COL_CATEGORY, COL_REASON):
+            header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(COL_DEST, QHeaderView.Stretch)
         self.table.verticalScrollBar().valueChanged.connect(self._request_visible_thumbnails)
         return self.table
@@ -490,7 +491,8 @@ class MainWindow(QWidget):
         self._update_buttons()
 
     def _on_execute_done(self, result) -> None:
-        self._clear_plan()
+        self._mark_rows_done()
+        self._plan = None
         parts = ['已处理 %d 个' % result.done]
         if result.skipped:
             parts.append('跳过 %d 个' % result.skipped)
@@ -504,6 +506,22 @@ class MainWindow(QWidget):
             if len(result.errors) > 20:
                 detail += '\n…还有 %d 条' % (len(result.errors) - 20)
             QMessageBox.warning(self, '部分文件没有处理成功', detail)
+
+    def _mark_rows_done(self) -> None:
+        """整理完把表格里处理过的行标一下，方便回头看做了什么。"""
+        if self._plan is None:
+            return
+        grey = QBrush(QColor(150, 150, 150))
+        for row, item in enumerate(self._plan.items[:self.table.rowCount()]):
+            if not item.will_change:
+                continue
+            cell = self.table.item(row, COL_REASON)
+            if cell is not None:
+                cell.setText('已完成')
+            for column in range(self.table.columnCount()):
+                target = self.table.item(row, column)
+                if target is not None:
+                    target.setForeground(grey)
 
     # ---------- 撤销 ----------
 
