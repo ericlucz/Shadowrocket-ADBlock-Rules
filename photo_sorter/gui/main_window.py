@@ -6,8 +6,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize
 from PySide6.QtGui import QBrush, QColor, QIcon, QPixmap
-from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox,
-                               QFileDialog, QFormLayout, QGridLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox,
+                               QComboBox, QFileDialog, QFormLayout, QGridLayout,
                                QGroupBox, QHBoxLayout, QHeaderView, QLabel,
                                QLineEdit, QMessageBox, QProgressBar,
                                QPushButton, QTableWidget, QTableWidgetItem,
@@ -46,6 +46,9 @@ class MainWindow(QWidget):
         self._thumbs = ThumbnailLoader(THUMB_SIZE, self)
         self._thumbs.ready.connect(self._on_thumbnail)
         self._thumbs.start()
+        app = QApplication.instance()
+        if app is not None:  # 程序直接退出时也要把后台线程收干净
+            app.aboutToQuit.connect(self._stop_threads)
 
         self._build_ui()
         self._load_settings()
@@ -179,9 +182,12 @@ class MainWindow(QWidget):
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(COL_THUMB, QHeaderView.Fixed)
         header.resizeSection(COL_THUMB, THUMB_SIZE + 12)
-        for column in (COL_NAME, COL_TAKEN, COL_SOURCE, COL_CATEGORY, COL_REASON):
+        for column in (COL_NAME, COL_TAKEN, COL_SOURCE, COL_CATEGORY):
             header.setSectionResizeMode(column, QHeaderView.ResizeToContents)
         header.setSectionResizeMode(COL_DEST, QHeaderView.Stretch)
+        header.setStretchLastSection(False)  # 多余宽度给路径列，“说明”留够固定宽度
+        header.setSectionResizeMode(COL_REASON, QHeaderView.Interactive)
+        header.resizeSection(COL_REASON, 150)
         self.table.verticalScrollBar().valueChanged.connect(self._request_visible_thumbnails)
         return self.table
 
@@ -253,13 +259,17 @@ class MainWindow(QWidget):
         put('use_mtime', self.mtime_check.isChecked())
         put('dedup', self.dedup_check.isChecked())
 
-    def closeEvent(self, event) -> None:
-        self._save_settings()
-        self._thumbs.stop()
-        self._thumbs.wait(2000)
-        if self._worker and self._worker.isRunning():
+    def _stop_threads(self) -> None:
+        if self._thumbs.isRunning():
+            self._thumbs.stop()
+            self._thumbs.wait(2000)
+        if self._worker is not None and self._worker.isRunning():
             self._worker.cancel()
             self._worker.wait(3000)
+
+    def closeEvent(self, event) -> None:
+        self._save_settings()
+        self._stop_threads()
         super().closeEvent(event)
 
     # ---------- 交互 ----------
@@ -314,6 +324,15 @@ class MainWindow(QWidget):
     def _clear_plan(self) -> None:
         self._plan = None
         self.table.setRowCount(0)
+
+    def _confirm(self, title: str, text: str, ok_text: str) -> bool:
+        """确认框。Qt 自带按钮是英文的，这里换成中文，并且默认停在“取消”上。"""
+        box = QMessageBox(QMessageBox.Question, title, text, QMessageBox.NoButton, self)
+        ok_button = box.addButton(ok_text, QMessageBox.AcceptRole)
+        cancel_button = box.addButton('取消', QMessageBox.RejectRole)
+        box.setDefaultButton(cancel_button)
+        box.exec()
+        return box.clickedButton() is ok_button
 
     def _busy(self) -> bool:
         return self._worker is not None and self._worker.isRunning()
@@ -471,11 +490,11 @@ class MainWindow(QWidget):
             return
         pending = len(self._plan.pending)
         verb = '复制' if self._plan.options.operation == OP_COPY else '移动'
-        answer = QMessageBox.question(
-            self, '确认整理',
-            '将%s %d 个文件到：\n%s\n\n整理后可以用“撤销上次整理”还原。' % (verb, pending, self._plan.dest_root),
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not self._confirm(
+                '确认整理',
+                '将%s %d 个文件到：\n%s\n\n整理后可以用“撤销上次整理”还原。'
+                % (verb, pending, self._plan.dest_root),
+                '开始整理'):
             return
 
         self.status_label.setText('正在整理…')
@@ -531,11 +550,10 @@ class MainWindow(QWidget):
             QMessageBox.information(self, '没有可撤销的记录', '还没有可以撤销的整理记录。')
             self._update_buttons()
             return
-        answer = QMessageBox.question(
-            self, '撤销上次整理',
-            '将把上次整理的文件还原到原来的位置。\n记录：%s\n\n继续吗？' % journal.name,
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
+        if not self._confirm(
+                '撤销上次整理',
+                '将把上次整理的文件还原到原来的位置。\n记录：%s' % journal.name,
+                '撤销'):
             return
 
         self.status_label.setText('正在撤销…')
