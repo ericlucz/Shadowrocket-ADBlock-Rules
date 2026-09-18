@@ -1,0 +1,56 @@
+{
+  // ── 让上述扩展在本仓库开箱即用的最小配置 ──
+
+  // 规则文件按 ini / 纯文本高亮，避免被当成未知格式
+  "files.associations": {
+    "*.conf": "ini",
+    "*.list": "plaintext",
+    "factory/manual_*.txt": "plaintext",
+    "factory/template/*.txt": "plaintext"
+  },
+
+  // 04 Error Lens：只在行内提示错误和警告，不被 hint 刷屏
+  "errorLens.enabledDiagnosticLevels": ["error", "warning"],
+  "errorLens.excludeBySource": ["cSpell"],
+
+  // 03 Prettier：只接管 json / md / yaml，生成出来的规则文件绝不格式化
+  "prettier.requireConfig": false,
+  "[json]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[jsonc]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[markdown]": { "editor.defaultFormatter": "esbenp.prettier-vscode" },
+  "[ini]": { "editor.formatOnSave": false },
+  "[plaintext]": { "editor.formatOnSave": false },
+
+  // 07 Todo Tree：扫描范围排除生成产物，否则规则文件里的注释会淹没结果
+  "todo-tree.general.tags": ["TODO", "FIXME", "NOTE", "HACK", "XXX", "BUG"],
+  "todo-tree.filtering.excludeGlobs": [
+    "**/*.conf",
+    "**/factory/resultant/**"
+  ],
+
+  // 06 Code Spell Checker：项目专有名词白名单，避免满屏波浪线
+  "cSpell.words": [
+    "adblock",
+    "Adblock",
+    "banad",
+    "banlist",
+    "CIDR",
+    "chinaz",
+    "cnip",
+    "easylist",
+    "easylistchina",
+    "GEOIP",
+    "lxml",
+    "Moshel",
+    "Shadowrocket",
+    "xinggsf"
+  ],
+  "cSpell.ignorePaths": [
+    "*.conf",
+    "factory/resultant/**",
+    "factory/manual_*.txt"
+  ],
+
+  // 05 Path Intellisense：从仓库根解析以 / 开头的路径
+  "path-intellisense.mappings": { "/": "${workspaceRoot}" }
+}

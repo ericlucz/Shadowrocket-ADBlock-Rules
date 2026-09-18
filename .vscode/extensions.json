@@ -1,0 +1,21 @@
+{
+  // 本项目推荐的 VS Code 扩展。用 VS Code 打开本仓库时会提示一键安装。
+  // 也可手动安装：code --install-extension <id>
+  "recommendations": [
+    // 基础四件套
+    "eamodio.gitlens",                        // 01 GitLens — Git 历史可视化，追溯规则的增删来源
+    "dbaeumer.vscode-eslint",                 // 02 ESLint — JS/TS 语法与规范检查
+    "esbenp.prettier-vscode",                 // 03 Prettier — json / md / yaml 格式统一
+    "usernamehw.errorlens",                   // 04 Error Lens — 报错与警告直接显示在代码行内
+
+    // 效率补充
+    "christian-kohler.path-intellisense",     // 05 Path Intellisense — 文件路径自动补全
+    "streetsidesoftware.code-spell-checker",  // 06 Code Spell Checker — 变量名/注释/文档拼写检查
+    "Gruntfuggly.todo-tree",                  // 07 Todo Tree — 聚合 TODO / FIXME / NOTE
+    "alefragnani.project-manager",            // 10 Project Manager — 多仓库工作区快速切换
+
+    // 接口调试
+    "humao.rest-client",                      // 08 REST Client — 编辑器内直接发 HTTP 请求（.http 文件）
+    "rangav.vscode-thunder-client"            // 09 Thunder Client — 轻量级接口测试 GUI
+  ]
+}
