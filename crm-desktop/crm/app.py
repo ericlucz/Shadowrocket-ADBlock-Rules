@@ -1,10 +1,12 @@
 """界面层：基于 Tkinter 的桌面客户关系管理程序。"""
 import os
+import sys
 import tkinter as tk
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, font, messagebox, ttk
 
 from .db import (CUSTOMER_LEVELS, CUSTOMER_STATUSES, DEAL_STAGES,
                  FOLLOWUP_METHODS, Database, today)
+from .demo import load_demo_data
 
 APP_TITLE = "客户关系管理系统 CRM"
 
@@ -248,6 +250,9 @@ class CRMApp:
         root.geometry("1100x680")
         root.minsize(900, 560)
 
+        if sys.platform == "win32":
+            for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+                font.nametofont(name).configure(family="Microsoft YaHei UI", size=9)
         style = ttk.Style()
         if "clam" in style.theme_names():
             style.theme_use("clam")
@@ -274,6 +279,7 @@ class CRMApp:
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="导入客户（CSV）...", command=self.import_csv)
         file_menu.add_command(label="导出客户（CSV）...", command=self.export_csv)
+        file_menu.add_command(label="载入演示数据", command=self.load_demo)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.root.destroy)
         menubar.add_cascade(label="文件", menu=file_menu)
@@ -557,6 +563,11 @@ class CRMApp:
             return
         self.refresh_all()
         messagebox.showinfo("导入完成", f"成功导入 {n} 位客户")
+
+    def load_demo(self):
+        if messagebox.askyesno("载入演示数据", "将向当前数据库添加 5 位演示客户及其跟进记录和商机，是否继续？"):
+            load_demo_data(self.db)
+            self.refresh_all()
 
     def refresh_all(self):
         self.refresh_dashboard()

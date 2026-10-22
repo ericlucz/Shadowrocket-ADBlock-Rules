@@ -22,7 +22,15 @@ python main.py --demo     # 写入一批演示数据后启动，方便体验
 python main.py --db 路径  # 使用指定的数据文件
 ```
 
-## 打包成可执行文件（可选）
+## Windows 可执行文件（EXE）
+
+无需安装 Python：直接下载 `CRM.exe` 双击运行即可。每次修改 `crm-desktop/` 后，GitHub Actions 中的
+「Build CRM exe」工作流会在 Windows 上自动构建，在该次运行页面底部的 Artifacts 中下载 `CRM-windows`。
+
+首次运行时数据库为空，可通过菜单「文件 → 载入演示数据」体验功能。程序未做代码签名，
+Windows 可能提示「Windows 已保护你的电脑」，点击「更多信息 → 仍要运行」即可。
+
+自行打包：
 
 ```bash
 pip install pyinstaller
