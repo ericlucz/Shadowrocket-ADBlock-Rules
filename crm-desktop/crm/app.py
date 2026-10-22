@@ -7,6 +7,7 @@ from tkinter import filedialog, font, messagebox, ttk
 from .db import (CUSTOMER_LEVELS, CUSTOMER_STATUSES, DEAL_STAGES,
                  FOLLOWUP_METHODS, Database, today)
 from .demo import load_demo_data
+from .mail_ui import MailTab, display_sender
 
 APP_TITLE = "客户关系管理系统 CRM"
 
@@ -184,6 +185,18 @@ class CustomerDetail(tk.Toplevel):
         frame.pack(fill="both", expand=True)
         self.deal_tree.bind("<Double-1>", lambda e: self.edit_deal())
 
+        # 往来邮件
+        tab = ttk.Frame(notebook, padding=6)
+        notebook.add(tab, text="往来邮件")
+        bar = ttk.Frame(tab)
+        bar.pack(fill="x", pady=(0, 6))
+        ttk.Button(bar, text="写邮件", command=self.write_email).pack(side="left")
+        ttk.Label(bar, text="双击查看邮件内容", foreground="#888888").pack(side="left", padx=8)
+        frame, self.email_tree = make_tree(
+            tab, [("dir", "方向"), ("subject", "主题"), ("date", "时间")], [60, 520, 130])
+        frame.pack(fill="both", expand=True)
+        self.email_tree.bind("<Double-1>", lambda e: self.view_email())
+
         self.refresh()
 
     def refresh(self):
@@ -204,6 +217,10 @@ class CustomerDetail(tk.Toplevel):
         for d in self.db.list_deals(self.customer_id):
             self.deal_tree.insert("", "end", iid=d["id"], values=(
                 d["title"], money(d["amount"]), d["stage"], d["expected_date"]))
+        self.email_tree.delete(*self.email_tree.get_children())
+        for e in self.db.emails_for_customer(self.customer_id):
+            self.email_tree.insert("", "end", iid=e["id"], values=(
+                "收到" if e["folder"] == "INBOX" else "发出", e["subject"] or "（无主题）", e["date"]))
 
     def changed(self):
         self.refresh()
@@ -241,6 +258,27 @@ class CustomerDetail(tk.Toplevel):
             self.db.delete_deal(did)
             self.changed()
 
+    def write_email(self):
+        address = self.db.get_customer(self.customer_id)["email"].strip()
+        if not address:
+            messagebox.showinfo("提示", "该客户没有填写邮箱，请先编辑客户资料", parent=self)
+            return
+        self.app.mail.compose(to=address)
+
+    def view_email(self):
+        eid = selected_id(self.email_tree)
+        if not eid:
+            return
+        e = self.db.get_email(eid)
+        win = tk.Toplevel(self)
+        win.title(e["subject"] or "（无主题）")
+        win.geometry("640x480")
+        text = tk.Text(win, wrap="word", padx=10, pady=10)
+        text.pack(fill="both", expand=True)
+        text.insert("1.0", f"主题：{e['subject']}\n发件人：{display_sender(e)}\n"
+                           f"收件人：{e['recipients']}\n时间：{e['date']}\n\n{e['body']}")
+        text.configure(state="disabled")
+
 
 class CRMApp:
     def __init__(self, root, db):
@@ -268,6 +306,7 @@ class CRMApp:
         self.build_customers()
         self.build_deals()
         self.build_reminders()
+        self.mail = MailTab(self, self.notebook)
 
         self.status = ttk.Label(root, anchor="w", padding=(8, 2))
         self.status.pack(fill="x", side="bottom")
@@ -279,6 +318,7 @@ class CRMApp:
         file_menu = tk.Menu(menubar, tearoff=False)
         file_menu.add_command(label="导入客户（CSV）...", command=self.import_csv)
         file_menu.add_command(label="导出客户（CSV）...", command=self.export_csv)
+        file_menu.add_command(label="邮箱设置...", command=lambda: self.mail.settings())
         file_menu.add_command(label="载入演示数据", command=self.load_demo)
         file_menu.add_separator()
         file_menu.add_command(label="退出", command=self.root.destroy)
@@ -382,7 +422,8 @@ class CRMApp:
         actions = ttk.Frame(tab)
         actions.pack(fill="x", pady=(0, 8), before=bar)
         for text, cmd in [("新增客户", self.add_customer), ("编辑", self.edit_customer),
-                          ("详情 / 跟进", self.open_detail), ("删除", self.delete_customer)]:
+                          ("详情 / 跟进", self.open_detail), ("发邮件", self.email_customer),
+                          ("删除", self.delete_customer)]:
             ttk.Button(actions, text=text, command=cmd).pack(side="left", padx=(0, 4))
 
         frame, self.customer_tree = make_tree(
@@ -407,8 +448,8 @@ class CRMApp:
                 c["status"], c["level"], c["owner"], c["updated_at"]))
         self.status.configure(text=f"共 {len(rows)} 位客户    数据文件：{self.db_path_text()}")
 
-    def add_customer(self):
-        dlg = FormDialog(self.root, "新增客户", CUSTOMER_FORM)
+    def add_customer(self, initial=None):
+        dlg = FormDialog(self.root, "新增客户", CUSTOMER_FORM, initial)
         if dlg.result:
             try:
                 self.db.add_customer(dlg.result)
@@ -439,6 +480,17 @@ class CRMApp:
         if messagebox.askyesno("确认删除", f"确定删除客户「{name}」？\n其跟进记录和商机将一并删除。"):
             self.db.delete_customer(cid)
             self.refresh_all()
+
+    def email_customer(self):
+        cid = selected_id(self.customer_tree)
+        if not cid:
+            messagebox.showinfo("提示", "请先选择一个客户")
+            return
+        address = self.db.get_customer(cid)["email"].strip()
+        if not address:
+            messagebox.showinfo("提示", "该客户没有填写邮箱，请先编辑客户资料")
+            return
+        self.mail.compose(to=address)
 
     def open_detail(self, cid=None):
         cid = cid or selected_id(self.customer_tree)
@@ -574,6 +626,7 @@ class CRMApp:
         self.refresh_customers()
         self.refresh_deals()
         self.refresh_reminders()
+        self.mail.refresh()
 
 
 def main(db_path=None):

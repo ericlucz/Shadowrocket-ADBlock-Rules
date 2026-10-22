@@ -47,6 +47,26 @@ CREATE TABLE IF NOT EXISTS deals (
     created_at   TEXT NOT NULL,
     updated_at   TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS settings (
+    key    TEXT PRIMARY KEY,
+    value  TEXT DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS emails (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    folder       TEXT NOT NULL,              -- INBOX 收件箱 / SENT 已发送
+    msg_key      TEXT NOT NULL,              -- 去重用：Message-ID 或 UID
+    uid          INTEGER DEFAULT 0,
+    sender       TEXT DEFAULT '',
+    sender_addr  TEXT DEFAULT '',
+    recipients   TEXT DEFAULT '',
+    subject      TEXT DEFAULT '',
+    date         TEXT DEFAULT '',
+    body         TEXT DEFAULT '',
+    attachments  TEXT DEFAULT '',
+    is_read      INTEGER DEFAULT 0,
+    UNIQUE (folder, msg_key)
+);
+CREATE INDEX IF NOT EXISTS idx_emails_sender ON emails(sender_addr);
 CREATE INDEX IF NOT EXISTS idx_followups_customer ON followups(customer_id);
 CREATE INDEX IF NOT EXISTS idx_deals_customer ON deals(customer_id);
 """
@@ -218,6 +238,78 @@ class Database:
             "by_status": by_status,
             "by_stage": by_stage,
         }
+
+    # ---------- 设置 ----------
+    def get_settings(self, keys):
+        rows = dict(self.conn.execute(
+            f"SELECT key, value FROM settings WHERE key IN ({', '.join('?' * len(keys))})",
+            keys).fetchall())
+        return {k: rows.get(k, "") for k in keys}
+
+    def save_settings(self, values):
+        self.conn.executemany(
+            "INSERT INTO settings (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            [(k, str(v)) for k, v in values.items()])
+        self.conn.commit()
+
+    # ---------- 邮件 ----------
+    def save_email(self, folder, item, is_read=0):
+        """保存一封邮件，重复的（同一文件夹同一 Message-ID）忽略。返回是否新增。"""
+        key = item.get("message_id") or f"uid:{item.get('uid', 0)}:{item.get('date', '')}"
+        cur = self.conn.execute(
+            "INSERT OR IGNORE INTO emails (folder, msg_key, uid, sender, sender_addr, recipients, "
+            "subject, date, body, attachments, is_read) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (folder, key, item.get("uid", 0), item.get("sender", ""),
+             (item.get("sender_addr") or "").lower(), (item.get("recipients") or "").lower(),
+             item.get("subject", ""), item.get("date", ""), item.get("body", ""),
+             item.get("attachments", ""), is_read))
+        self.conn.commit()
+        return cur.rowcount > 0
+
+    def max_email_uid(self, folder="INBOX"):
+        return self.conn.execute(
+            "SELECT COALESCE(MAX(uid), 0) FROM emails WHERE folder = ?", (folder,)).fetchone()[0]
+
+    def list_emails(self, folder, keyword=""):
+        sql = "SELECT * FROM emails WHERE folder = ?"
+        args = [folder]
+        if keyword:
+            sql += " AND (subject LIKE ? OR sender LIKE ? OR sender_addr LIKE ? OR recipients LIKE ? OR body LIKE ?)"
+            args += [f"%{keyword}%"] * 5
+        return self.conn.execute(sql + " ORDER BY date DESC, id DESC", args).fetchall()
+
+    def get_email(self, email_id):
+        return self.conn.execute("SELECT * FROM emails WHERE id = ?", (email_id,)).fetchone()
+
+    def mark_email_read(self, email_id):
+        self.conn.execute("UPDATE emails SET is_read = 1 WHERE id = ?", (email_id,))
+        self.conn.commit()
+
+    def delete_email(self, email_id):
+        self.conn.execute("DELETE FROM emails WHERE id = ?", (email_id,))
+        self.conn.commit()
+
+    def unread_count(self):
+        return self.conn.execute(
+            "SELECT COUNT(*) FROM emails WHERE folder = 'INBOX' AND is_read = 0").fetchone()[0]
+
+    def emails_for_customer(self, customer_id):
+        """该客户的往来邮件：发件人是客户，或收件人中包含客户邮箱。"""
+        c = self.get_customer(customer_id)
+        addr = (c["email"] if c else "").strip().lower()
+        if not addr:
+            return []
+        return self.conn.execute(
+            "SELECT * FROM emails WHERE sender_addr = ? OR (', ' || recipients || ',') LIKE ? "
+            "ORDER BY date DESC, id DESC", (addr, f"%, {addr},%")).fetchall()
+
+    def find_customer_by_email(self, addr):
+        addr = (addr or "").strip().lower()
+        if not addr:
+            return None
+        return self.conn.execute(
+            "SELECT * FROM customers WHERE lower(trim(email)) = ? LIMIT 1", (addr,)).fetchone()
 
     # ---------- 导入导出 ----------
     def export_customers_csv(self, path):
