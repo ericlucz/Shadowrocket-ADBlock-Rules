@@ -2,6 +2,7 @@ name: Build CRM exe
 
 on:
   push:
+    branches: [master]
     paths:
       - "crm-desktop/**"
       - ".github/workflows/build-crm-exe.yml"
